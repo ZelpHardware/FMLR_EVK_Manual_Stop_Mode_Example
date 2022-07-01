@@ -14,7 +14,7 @@ This demonstrator is to show it is possible, albeit on the much simpler EVK PCB.
 Useful links:
 
 [EVK Schematics](https://docs.miromico.ch/datasheets/_attachments/evk/dk_fmlr_stm_SX12xx_V5.0.pdf)  
-[EVK Quick Start Guide](https://docs.miromico.ch/datasheets/_attachments/evk/dk_fmlr_stm_SX12xx_V5.0.pdf)  
+[EVK Quick Start Guide](https://docs.miromico.ch/devkits/evk_stm_sx1272.html)  
 
 ![FMLR Pin Out](images/fmlr_pinout.png)  
 ![EVK Pin Out](images/evk_pinout.png)  

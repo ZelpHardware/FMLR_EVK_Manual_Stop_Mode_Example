@@ -32,11 +32,11 @@
 #define ONE_BYTE 		1
 #define TWO_BYTES		2
 #define OK 0
-#define UART_TIMEOUT	10
-#define I2C_TIMEOUT	10
+#define UART_TIMEOUT		10
+#define I2C_TIMEOUT		10
 #define SHT31_ADDRESS 		0x8A // Note: Addr << 1
 #define SHORT_BLINK   		100
-#define LONG_BLINK 			500
+#define LONG_BLINK 		500
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -74,6 +74,7 @@ static void MX_SPI2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
+void Error_Msg_Handler(const char *msg);
 void EnterStopMode(void);
 uint8_t readRegSpi(SPI_HandleTypeDef *hspi, uint8_t reg);
 void writeRegSpi(SPI_HandleTypeDef *hspi, uint8_t reg, uint8_t data);
@@ -121,19 +122,23 @@ int main(void)
   MX_I2C1_Init();
   MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  // Redirect printf to UART1
   RetargetInit(&huart1);
+
+  // Run at Range 2 (Core voltage 1.5V) @ 4MHz to reduce run mode power slightly
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  // Check SHT31 communication over I2C
+  // Check SHT31 communication over I2C1
    uint8_t reset_cmd[2] = {0x30, 0xa2};
    if (HAL_I2C_Master_Transmit(&hi2c1, SHT31_ADDRESS, reset_cmd, 2, 1000) == HAL_OK) {
- 	  printf("\n\rSHT31 successfully reset!");
+ 	  printf("\n\rSHT31 successfully reset");
    }
    else {
- 	  printf("\n\rSHT31 reset failed...");
+ 	  Error_Msg_Handler("\n\rSHT31 reset failed!");
    }
 
 
@@ -144,10 +149,18 @@ int main(void)
    HAL_Delay(1);
    HAL_GPIO_WritePin (RESET_RF_GPIO_Port, RESET_RF_Pin, GPIO_PIN_RESET);
    HAL_Delay(10);
-   // Send command to put Semtech SX1272 to sleep and then LoRa mode, after reading its ID register
+
+   // Check SX1272 SPI2 communication
    uint8_t sx_id = readRegSpi(&hspi2,0x42);
-   printf("\n\rSX1272 chip ID: %x", sx_id);
-   // Don't forget to set Bit7 (MSB) of register address for writing!
+   if (sx_id == 0x22) {
+       printf("\n\rSX1272 chip ID read OK: %x", sx_id);
+   }
+   else {
+       Error_Msg_Handler("\n\rSX1272 ID read failure!");
+   }
+
+   // Send commands to put Semtech SX1272 to sleep
+   // (Don't forget to set Bit7 (MSB) of register address for writing!)
    writeRegSpi(&hspi2, 0xC0, 0xFF); // DIOmapping1  to --
    writeRegSpi(&hspi2, 0xC1, 0xFF); // DIOmapping2 to --
    HAL_Delay(10);
@@ -161,23 +174,29 @@ int main(void)
    HAL_Delay(10);
    writeRegSpi(&hspi2, 0x81, 0x80); // CTRL1 to SLEEP mode
    HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_SET);
-   printf("\n\rSX1272 should be in STOP mode...");
+   printf("\n\rSX1272 should now be in STANDBY mode...");
 
-   // Read flash ID, then put flash to deep sleep
+   // Read MX25 flash ID, then put flash to deep sleep
   uint8_t read_id_cmd[4] = {0x9F,0x55,0xAA,0x55};
   uint8_t read_result[4];
+  // CHeck MX25 SPI1 can read chip ID bytes 0xC22813
   HAL_GPIO_WritePin (FS_CS_GPIO_Port, FS_CS_Pin, GPIO_PIN_RESET);
   HAL_SPI_TransmitReceive(&hspi1, read_id_cmd, read_result, 4, SPI_TIMEOUT_SECS);
   HAL_GPIO_WritePin (FS_CS_GPIO_Port, FS_CS_Pin, GPIO_PIN_SET);
-  printf("\n\rMX25 chip ID: %x %x %x",read_result[1], read_result[2], read_result[3]);
+  if  (read_result[1]==0xC2 &&  read_result[2]==0x28 && read_result[3]==0x13) {
+      printf("\n\rMX25 chip ID read OK: %x %x %x",read_result[1], read_result[2], read_result[3]);
+  }
+  else {
+      Error_Msg_Handler ("MX25 SPI1 ID read failure!");
+  }
+
   uint8_t sleep_command[1] = {0xB9};
   HAL_GPIO_WritePin (FS_CS_GPIO_Port, FS_CS_Pin, GPIO_PIN_RESET);
   HAL_SPI_Transmit(&hspi1, sleep_command, 1, SPI_TIMEOUT_SECS);
   HAL_GPIO_WritePin (FS_CS_GPIO_Port, FS_CS_Pin, GPIO_PIN_SET);
   printf("\n\rMX25 put to deep sleep.");
 
-  printf("\n\rsetting SPI1/2 lines to low power state...");
-  spiToLowPowerState();
+
 
   printf("\n\rAbout to put STM32 to STOP mode...");
   // Blink LED a few times
@@ -189,7 +208,7 @@ int main(void)
 	HAL_Delay(SHORT_BLINK);
   }
 
-  void EnterStopMode(void);
+  EnterStopMode();
 
   for (int i=0; i<3; i++)
   {
@@ -198,7 +217,7 @@ int main(void)
 	setRgbLed(BLACK);
 	HAL_Delay(SHORT_BLINK);
   }
-  printf("\n\rThis should not print yet...");
+  printf("\n\rSTM32 has resumed execution...");
 
   while (1)
   {
@@ -386,7 +405,6 @@ static void MX_RTC_Init(void)
 
   RTC_TimeTypeDef sTime = {0};
   RTC_DateTypeDef sDate = {0};
-  RTC_AlarmTypeDef sAlarm = {0};
 
   /* USER CODE BEGIN RTC_Init 1 */
 
@@ -432,20 +450,9 @@ static void MX_RTC_Init(void)
     Error_Handler();
   }
 
-  /** Enable the Alarm A
+  /** Enable the WakeUp
   */
-  sAlarm.AlarmTime.Hours = 0x0;
-  sAlarm.AlarmTime.Minutes = 0x0;
-  sAlarm.AlarmTime.Seconds = 0x0;
-  sAlarm.AlarmTime.SubSeconds = 0x0;
-  sAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-  sAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
-  sAlarm.AlarmMask = RTC_ALARMMASK_NONE;
-  sAlarm.AlarmSubSecondMask = RTC_ALARMSUBSECONDMASK_ALL;
-  sAlarm.AlarmDateWeekDaySel = RTC_ALARMDATEWEEKDAYSEL_DATE;
-  sAlarm.AlarmDateWeekDay = 0x1;
-  sAlarm.Alarm = RTC_ALARM_A;
-  if (HAL_RTC_SetAlarm(&hrtc, &sAlarm, RTC_FORMAT_BCD) != HAL_OK)
+  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 0, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
   {
     Error_Handler();
   }
@@ -605,9 +612,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA15_Pin PA12_Pin PA11_Pin PA8_Pin
-                           PA2_Pin PA5_Pin BUTTON_Pin PA3_Pin */
+                           PA2_Pin PA5_Pin PA3_Pin */
   GPIO_InitStruct.Pin = PA15_Pin|PA12_Pin|PA11_Pin|PA8_Pin
-                          |PA2_Pin|PA5_Pin|BUTTON_Pin|PA3_Pin;
+                          |PA2_Pin|PA5_Pin|PA3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -644,6 +651,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BUTTON_Pin */
+  GPIO_InitStruct.Pin = BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : DIO1_Pin DIO0_Pin DIO2_Pin */
   GPIO_InitStruct.Pin = DIO1_Pin|DIO0_Pin|DIO2_Pin;
@@ -682,19 +695,10 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void EnterStopMode(void)
 {
-  // Clear old RTC Wake Timer settings
-  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
-
-  // Enable wake-up pin
-  //HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1);
-
-  // Set RTC to wake up afer about 20s
-   if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 0xFFFF, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
-  {
-	    Error_Handler();
-  }
-
-  //GPIO_InitTypeDef GPIO_InitStruct;
+  // Configure all GPIO port pins to optimal states for low power
+  printf("\n\rsetting SPI1/2 lines to low power state...");
+  spiToLowPowerState();
+  HAL_Delay(5);
 
   // Disable GPIOs clock
   __HAL_RCC_GPIOC_CLK_DISABLE();
@@ -704,7 +708,7 @@ void EnterStopMode(void)
   __HAL_RCC_GPIOH_CLK_DISABLE();
 
 
-  // Turn off peripherals
+  // Turn off peripherals except RTC
   HAL_ADC_Stop_IT(&hadc);
   HAL_ADC_DeInit(&hadc);
   HAL_SPI_DeInit(&hspi1);
@@ -713,8 +717,17 @@ void EnterStopMode(void)
   HAL_UART_DeInit(&huart1);
 
 
-  // Configure all GPIO port pins to optimal states for low power
+  // Clear old RTC Wake Timer settings
+  HAL_RTCEx_DeactivateWakeUpTimer(&hrtc);
 
+  // Enable wake-up pin
+  HAL_PWR_EnableWakeUpPin(PWR_WAKEUP_PIN1);
+
+  // Set RTC to wake up afer about 28s
+   if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 0xFFFF, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
+  {
+       Error_Msg_Handler("HAL_RTCEx_SetWakeUpTimer_IT failure!");
+  }
 
   // Stop the 1ms SysTick
   HAL_SuspendTick();
@@ -750,13 +763,13 @@ void EnterStopMode(void)
   HAL_ResumeTick();
 
 
-
   /* Clear Peripheral States for MspInit */
   huart1.gState = HAL_UART_STATE_RESET;
   hi2c1.State   = HAL_I2C_STATE_RESET;
   hadc.State    = HAL_ADC_STATE_RESET;
   hspi1.State    = HAL_SPI_STATE_RESET;
   hspi2.State    = HAL_SPI_STATE_RESET;
+
 
   /* Re-initialize things */
   MX_GPIO_Init();
@@ -766,123 +779,135 @@ void EnterStopMode(void)
   MX_SPI2_Init();
   MX_RTC_Init();
   MX_ADC_Init();
-  HAL_ADCEx_Calibration_Start(&hadc,ADC_SINGLE_ENDED);
 }
 
 void writeRegSpi(SPI_HandleTypeDef *hspi, uint8_t reg, uint8_t data)
 {
-	HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_RESET);
-	uint8_t reg_data[2] = {reg, data};
-    HAL_SPI_Transmit(hspi, reg_data, TWO_BYTES, SPI_TIMEOUT_SECS);
-    HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_RESET);
+  uint8_t reg_data[2] = {reg, data};
+  HAL_SPI_Transmit(hspi, reg_data, TWO_BYTES, SPI_TIMEOUT_SECS);
+HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_SET);
 
 }
 
 uint8_t readRegSpi(SPI_HandleTypeDef *hspi, uint8_t reg)
 {
-    uint8_t data = 0;
-    HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_RESET);
-    HAL_SPI_Transmit(hspi, &reg, ONE_BYTE, SPI_TIMEOUT_SECS);
-    HAL_SPI_Receive(hspi,  &data, ONE_BYTE, SPI_TIMEOUT_SECS);
-    HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_SET);
-    return data;
+  uint8_t data = 0;
+  HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_RESET);
+  HAL_SPI_Transmit(hspi, &reg, ONE_BYTE, SPI_TIMEOUT_SECS);
+  HAL_SPI_Receive(hspi,  &data, ONE_BYTE, SPI_TIMEOUT_SECS);
+  HAL_GPIO_WritePin (CS_RF_GPIO_Port, CS_RF_Pin, GPIO_PIN_SET);
+return data;
 }
 
 
 void setRgbLed(int led) {
 
-	switch (led) {
-	case RED:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
-		  break;
-	case YELLOW:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
-		  break;
-case GREEN:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
-		  break;
-	case CYAN:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
-			  break;
-	case BLUE:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
-		  break;
-	case MAGENTA:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
-		  break;
-	case WHITE:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
-		  break;
-	case BLACK:
-		  HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
-		  break;
+  switch (led)
+  {
+  case RED:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
+	    break;
+  case YELLOW:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
+	    break;
+  case GREEN:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
+	    break;
+  case CYAN:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
+		    break;
+  case BLUE:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
+	    break;
+  case MAGENTA:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
+	    break;
+  case WHITE:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_RESET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_RESET);
+	    break;
+  case BLACK:
+	    HAL_GPIO_WritePin (LEDR_GPIO_Port, LEDR_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDG_GPIO_Port, LEDG_Pin, GPIO_PIN_SET);
+	    HAL_GPIO_WritePin (LEDB_GPIO_Port, LEDB_Pin, GPIO_PIN_SET);
+	    break;
 
-	}
+  }
 }
 
 void spiToLowPowerState(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    // SPI1 to MX25 Flash - drive lines as low outputs
-    HAL_SPI_DeInit(&hspi1);
-    GPIO_InitStruct.Pin = SCK_P_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_WritePin (SCK_P_GPIO_Port, SCK_P_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_Init(SCK_P_GPIO_Port, &GPIO_InitStruct);
+  // SPI1 to MX25 Flash - drive lines as low outputs
+  HAL_SPI_DeInit(&hspi1);
+  GPIO_InitStruct.Pin = SCK_P_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_WritePin (SCK_P_GPIO_Port, SCK_P_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_Init(SCK_P_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = MOSI_P_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_WritePin (MOSI_P_GPIO_Port, MOSI_P_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MOSI_P_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = MOSI_P_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_WritePin (MOSI_P_GPIO_Port, MOSI_P_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_Init(MOSI_P_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = MISO_P_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_WritePin (MISO_P_GPIO_Port, MISO_P_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_Init(MISO_P_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = MISO_P_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_WritePin (MISO_P_GPIO_Port, MISO_P_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_Init(MISO_P_GPIO_Port, &GPIO_InitStruct);
 
-    // SPI2 to SX1272 - drive lines as low outputs
-    HAL_SPI_DeInit(&hspi2);
-    GPIO_InitStruct.Pin = SCK_RF_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(SCK_RF_GPIO_Port, &GPIO_InitStruct);
+  // SPI2 to SX1272 - drive lines as low outputs
+  HAL_SPI_DeInit(&hspi2);
+  GPIO_InitStruct.Pin = SCK_RF_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(SCK_RF_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = MOSI_RF_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(MOSI_RF_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = MOSI_RF_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(MOSI_RF_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = MISO_RF_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(MISO_RF_GPIO_Port, &GPIO_InitStruct);
+  GPIO_InitStruct.Pin = MISO_RF_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(MISO_RF_GPIO_Port, &GPIO_InitStruct);
 }
+
+void Error_Msg_Handler(const char *msg)
+{
+  // My version of Error Handler that prints a message
+  __disable_irq();
+  printf(msg);
+  while (1)
+  {
+  }
+}
+
+
 /* USER CODE END 4 */
 
 /**
@@ -894,7 +919,6 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  printf("\n\n\rOoops! Something went wrong...\n\r");
   while (1)
   {
   }
